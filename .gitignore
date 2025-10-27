@@ -1,3 +1,9 @@
 build/
 git_repo/
 .qodo/
+
+# Certificates
+*.pem
+*.crt
+*.key
+cert.h
