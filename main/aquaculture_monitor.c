@@ -4,7 +4,6 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "driver/gpio.h"
-#include "driver/adc.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
@@ -12,17 +11,40 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "adc_handler.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
 #include "esp_crt_bundle.h"
 #include "esp_tls.h"
+#include "cert_manager.h"
+#include "provision_certs.h"
+#include "load_cert.h"
 
 #define TAG "AQUA"
 
 // ========== COMPACT CONFIG ==========
-#define WIFI_SSID "TAMNET SYSTEMS"
-#define WIFI_PASS "Tamnet123"
+// WiFi credentials array
+typedef struct {
+    const char *ssid;
+    const char *password;
+} wifi_cred_t;
+
+// Structure for available network scan results
+typedef struct {
+    wifi_cred_t *network;
+    wifi_ap_record_t ap_info;
+} available_network_t;
+
+wifi_cred_t wifi_networks[] = {
+    {"TAMNET SYSTEMS", "Tamnet123"},
+    {"ztech", "112345678"}
+};
+
+#define WIFI_NETWORKS_COUNT (sizeof(wifi_networks) / sizeof(wifi_cred_t))
+#define WIFI_TIMEOUT_MS 15000  // 15 seconds to connect to each network
 #define SUPABASE_URL "https://konuwipzeywfgroqszzz.supabase.co/rest/v1/sensor_data"
 #define SUPABASE_KEY "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvbnV3aXB6ZXl3Zmdyb3Fzenp6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk4MzY4MzQsImV4cCI6MjA3NTQxMjgzNH0.i-Ru1I5Y8QAve9MiD64pKQ3yereW0022sbRj-xlxjWY"
 
@@ -32,11 +54,7 @@
 #define WATER_TEMP_PIN GPIO_NUM_5             // DS18B20 water temperature sensor
 #define PUMP_PIN GPIO_NUM_6                   // DC pump control
 
-// Analog Sensors (ADC1)
-#define PH_ADC_CH ADC_CHANNEL_5              // pH sensor on GPIO6
-#define DO_ADC_CH ADC_CHANNEL_6              // Dissolved Oxygen sensor on GPIO7
-#define TURBIDITY_ADC_CH ADC_CHANNEL_7       // Turbidity sensor on GPIO8
-#define AMMONIA_ADC_CH ADC_CHANNEL_8         // Ammonia sensor on GPIO9
+// Note: Analog sensor channels are defined in adc_config.h
 
 // Control Outputs
 #define RELAY_PIN GPIO_NUM_10                 // pH control relay
@@ -67,8 +85,7 @@
 #define TEST_AMMONIA_NORMAL 0.5f
 #define TEST_AMMONIA_HIGH 2.0f
 
-// ========== STATIC ADC (no heap) ==========
-static esp_adc_cal_characteristics_t adc_chars;
+// ========== Event Groups ==========
 static EventGroupHandle_t s_wifi_event_group;
 
 // ========== IMPROVED WIFI ==========
@@ -92,7 +109,7 @@ static void wifi_init(void) {
     ESP_LOGI(TAG, "Initializing NVS Flash...");
     ESP_ERROR_CHECK(nvs_flash_init());
 
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "Scanning for available WiFi networks...");
 
     esp_netif_init();
     esp_event_loop_create_default();
@@ -111,17 +128,110 @@ static void wifi_init(void) {
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
-        },
-    };
+    // Scan for available networks first
+    uint16_t ap_count = 0;
     esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     esp_wifi_start();
+
+    // Perform WiFi scan
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {
+            .active = {
+                .min = 100,
+                .max = 300
+            }
+        }
+    };
+
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+    esp_wifi_scan_get_ap_num(&ap_count);
+
+    ESP_LOGI(TAG, "Found %d access points", ap_count);
+
+    if (ap_count == 0) {
+        ESP_LOGW(TAG, "No WiFi networks found");
+    } else {
+        wifi_ap_record_t ap_records[ap_count];
+        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_records));
+
+        // Find our configured networks among the scan results
+        available_network_t available_networks[WIFI_NETWORKS_COUNT];
+        int available_count = 0;
+
+        for (int i = 0; i < ap_count; i++) {
+            for (int j = 0; j < WIFI_NETWORKS_COUNT; j++) {
+                if (strcmp((char*)ap_records[i].ssid, wifi_networks[j].ssid) == 0) {
+                    // Found one of our networks
+                    available_networks[available_count].network = &wifi_networks[j];
+                    memcpy(&available_networks[available_count].ap_info, &ap_records[i], sizeof(wifi_ap_record_t));
+                    available_count++;
+                    ESP_LOGI(TAG, "Network '%s' found with RSSI: %d", ap_records[i].ssid, ap_records[i].rssi);
+                    break;
+                }
+            }
+        }
+
+        ESP_LOGI(TAG, "Found %d of our configured networks available", available_count);
+
+        // Prioritize TAMNET SYSTEMS if available, use strongest signal for others
+        if (available_count > 1) {
+            // Check if TAMNET SYSTEMS is available
+            for (int i = 0; i < available_count; i++) {
+                if (strcmp(available_networks[i].network->ssid, "TAMNET SYSTEMS") == 0) {
+                    // Move TAMNET SYSTEMS to front (highest priority)
+                    if (i > 0) {
+                        available_network_t temp = available_networks[0];
+                        available_networks[0] = available_networks[i];
+                        available_networks[i] = temp;
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Try connecting to networks in order (TAMNET SYSTEMS first, then by signal strength)
+        for (int i = 0; i < available_count; i++) {
+            ESP_LOGI(TAG, "Trying network '%s' (RSSI: %d dBm)",
+                     available_networks[i].network->ssid, available_networks[i].ap_info.rssi);
+
+            wifi_config_t wifi_config = {
+                .sta = {
+                    .ssid = {},
+                    .password = {},
+                    .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+                    .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
+                },
+            };
+            strcpy((char*)wifi_config.sta.ssid, available_networks[i].network->ssid);
+            strcpy((char*)wifi_config.sta.password, available_networks[i].network->password);
+
+            esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+            esp_wifi_connect();
+
+            // Wait for connection with timeout
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                    WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                    pdTRUE, pdFALSE, pdMS_TO_TICKS(WIFI_TIMEOUT_MS));
+
+            if (bits & WIFI_CONNECTED_BIT) {
+                ESP_LOGI(TAG, "Successfully connected to '%s' (RSSI: %d dBm)",
+                         available_networks[i].network->ssid, available_networks[i].ap_info.rssi);
+                return;
+            } else {
+                ESP_LOGW(TAG, "Failed to connect to '%s', trying next network...",
+                         available_networks[i].network->ssid);
+            }
+        }
+
+        ESP_LOGE(TAG, "Failed to connect to any available network");
+    }
+
+    ESP_LOGE(TAG, "WiFi initialization failed - no networks available");
 }
 
 // ========== DHT22 (improved reliability) ==========
@@ -209,72 +319,75 @@ static esp_err_t dht22_read(float* hum, float* temp) {
 // pH Sensor
 static float read_ph(void) {
     const int SAMPLES = 10;
-    int sum = 0;
+    int sum_mv = 0;
 
     for (int i = 0; i < SAMPLES; i++) {
-        sum += adc1_get_raw(PH_ADC_CH);
+        int mv;
+        ESP_ERROR_CHECK(read_adc_voltage(PH_ADC_CH, &mv));
+        sum_mv += mv;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    int raw = sum / SAMPLES;
-    uint32_t mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
+    int avg_mv = sum_mv / SAMPLES;
 
     // pH calculation (adjust these values based on calibration)
-    float ph = 7.0f + ((2500.0f - mv) / 180.0f);
+    float ph = 7.0f + ((2500.0f - avg_mv) / 180.0f);
     return (ph >= 0.0f && ph <= 14.0f) ? ph : -1.0f;
 }
 
 // Dissolved Oxygen Sensor
 static float read_do(void) {
     const int SAMPLES = 10;
-    int sum = 0;
+    int sum_mv = 0;
 
     for (int i = 0; i < SAMPLES; i++) {
-        sum += adc1_get_raw(DO_ADC_CH);
+        int mv;
+        ESP_ERROR_CHECK(read_adc_voltage(DO_ADC_CH, &mv));
+        sum_mv += mv;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    int raw = sum / SAMPLES;
-    uint32_t mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
+    int avg_mv = sum_mv / SAMPLES;
 
     // DO calculation (adjust calibration values)
-    float do_value = mv * 0.2f; // Convert mV to mg/L (adjust factor based on calibration)
+    float do_value = avg_mv * 0.2f; // Convert mV to mg/L (adjust factor based on calibration)
     return (do_value >= 0.0f && do_value <= 20.0f) ? do_value : -1.0f;
 }
 
 // Turbidity Sensor
 static float read_turbidity(void) {
     const int SAMPLES = 10;
-    int sum = 0;
+    int sum_mv = 0;
 
     for (int i = 0; i < SAMPLES; i++) {
-        sum += adc1_get_raw(TURBIDITY_ADC_CH);
+        int mv;
+        ESP_ERROR_CHECK(read_adc_voltage(TURBIDITY_ADC_CH, &mv));
+        sum_mv += mv;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-
-    int raw = sum / SAMPLES;
-    uint32_t mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
+    int avg_mv = sum_mv / SAMPLES;
 
     // Turbidity calculation (adjust calibration values)
-    float ntu = mv * 0.5f; // Convert mV to NTU (adjust factor based on calibration)
+    float ntu = avg_mv * 0.5f; // Convert mV to NTU (adjust factor based on calibration)
     return (ntu >= 0.0f && ntu <= 1000.0f) ? ntu : -1.0f;
 }
 
 // Ammonia Sensor
 static float read_ammonia(void) {
     const int SAMPLES = 10;
-    int sum = 0;
+    int sum_mv = 0;
 
     for (int i = 0; i < SAMPLES; i++) {
-        sum += adc1_get_raw(AMMONIA_ADC_CH);
+        int mv;
+        ESP_ERROR_CHECK(read_adc_voltage(AMMONIA_ADC_CH, &mv));
+        sum_mv += mv;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    int raw = sum / SAMPLES;
-    uint32_t mv = esp_adc_cal_raw_to_voltage(raw, &adc_chars);
+    int avg_mv = sum_mv / SAMPLES;
 
     // Ammonia calculation (adjust calibration values)
-    float nh3 = mv * 0.1f; // Convert mV to mg/L (adjust factor based on calibration)
+    float nh3 = avg_mv * 0.1f; // Convert mV to mg/L (adjust factor based on calibration)
     return (nh3 >= 0.0f && nh3 <= 10.0f) ? nh3 : -1.0f;
 }
 
@@ -296,10 +409,9 @@ static void init_supabase_client(void) {
         .url = SUPABASE_URL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 20000,            // Increased timeout
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .cert_pem = supabase_root_cert,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,  // Use SSL/TLS
         .skip_cert_common_name_check = true,
-        .crt_bundle_attach = NULL,      // Don't use the bundle
+        .use_global_ca_store = true,    // Use global CA store
         .keep_alive_enable = true,      // Enable keep-alive
         .buffer_size = 2048,            // Increased buffer size
         .buffer_size_tx = 1024,         // Increased TX buffer
@@ -316,6 +428,9 @@ static void init_supabase_client(void) {
         ESP_LOGE(TAG, "[SUPABASE] Failed to initialize HTTP client");
         return;
     }
+
+    // Use the global CA store - no need to load additional certificates
+    ESP_LOGI(TAG, "[SUPABASE] HTTP client initialized with global CA store");
 
     esp_http_client_set_header(supabase_client, "Content-Type", "application/json");
     esp_http_client_set_header(supabase_client, "apikey", SUPABASE_KEY);
@@ -338,15 +453,25 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
     int retry_count = 0;
     int delay_ms = 1000; // Start with 1 second delay
 
-    // Wait for WiFi connection
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            pdMS_TO_TICKS(1000));  // Add timeout
+    // Wait for WiFi connection with longer timeout
+    EventBits_t bits;
+    for (int wait_attempts = 0; wait_attempts < 5; wait_attempts++) {
+        bits = xEventGroupWaitBits(s_wifi_event_group,
+                WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                pdFALSE,
+                pdFALSE,
+                pdMS_TO_TICKS(2000));  // 2 second timeout per attempt
+
+        if (bits & WIFI_CONNECTED_BIT) {
+            break;
+        }
+
+        ESP_LOGW(TAG, "Waiting for WiFi connection... attempt %d/5", wait_attempts + 1);
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before retrying
+    }
 
     if (!(bits & WIFI_CONNECTED_BIT)) {
-        ESP_LOGE(TAG, "WiFi not connected");
+        ESP_LOGE(TAG, "WiFi not connected after waiting");
         return false;
     }
 
@@ -385,8 +510,9 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
     strcat(json, temp);
 
     // Control states
+    // Split control states formatting to avoid buffer overflow
     snprintf(temp, sizeof(temp),
-        "\"ph_relay\":%s,\"aerator\":%s,\"filter\":%s,\"pump\":%s,\"created_at\":\"NOW()\"}",
+        "\"ph_relay\":%s,\"aerator\":%s,\"filter\":%s,\"pump\":%s}",
         ph_relay ? "true" : "false",
         aerator ? "true" : "false",
         filter ? "true" : "false",
@@ -560,10 +686,15 @@ static void check_and_send_alerts(float water_temp, float do_level, float ph,
         strcat(json, temp);
 
         // Sensor values
+        // Split sensor values formatting to avoid buffer overflow
         snprintf(temp, sizeof(temp),
-                "\"water_temp\":%.2f,\"do_level\":%.2f,\"ph\":%.2f,"
-                "\"ammonia\":%.2f,\"turbidity\":%.2f}}",
-                water_temp, do_level, ph, ammonia, turbidity);
+                "\"water_temp\":%.2f,\"do_level\":%.2f,\"ph\":%.2f}",
+                water_temp, do_level, ph);
+        strcat(json, temp);
+
+        snprintf(temp, sizeof(temp),
+                ",\"ammonia\":%.2f,\"turbidity\":%.2f}}",
+                ammonia, turbidity);
         strcat(json, temp);
 
         if (!alert_client) {
@@ -573,20 +704,22 @@ static void check_and_send_alerts(float water_temp, float do_level, float ph,
             }
         }
 
-        esp_http_client_set_post_field(alert_client, json, strlen(json));
-        esp_err_t err = esp_http_client_perform(alert_client);
+        if (alert_client) {
+            esp_http_client_set_post_field(alert_client, json, strlen(json));
+            esp_err_t err = esp_http_client_perform(alert_client);
 
-        if (err == ESP_OK) {
-            int status = esp_http_client_get_status_code(alert_client);
-            if (status >= 200 && status < 300) {
-                // Update last alert state only if successfully sent
-                memcpy(&last_alerts, &current_alerts, sizeof(alert_states_t));
-                ESP_LOGI(TAG, "Alert notification sent successfully");
+            if (err == ESP_OK) {
+                int status = esp_http_client_get_status_code(alert_client);
+                if (status >= 200 && status < 300) {
+                    // Update last alert state only if successfully sent
+                    memcpy(&last_alerts, &current_alerts, sizeof(alert_states_t));
+                    ESP_LOGI(TAG, "Alert notification sent successfully");
+                }
+            } else {
+                ESP_LOGE(TAG, "Failed to send alert notification");
+                // Reinitialize client on error
+                init_alert_client();
             }
-        } else {
-            ESP_LOGE(TAG, "Failed to send alert notification");
-            // Reinitialize client on error
-            init_alert_client();
         }
     }
 }
@@ -699,8 +832,21 @@ void app_main(void) {
     ESP_LOGI(TAG, "Initializing NVS Flash...");
     ESP_ERROR_CHECK(nvs_flash_init());
 
+    // Initialize ADC
+    ESP_LOGI(TAG, "Initializing ADC...");
+    ESP_ERROR_CHECK(init_adc());
+
+    // Initialize certificates
+    ESP_LOGI(TAG, "Provisioning certificates...");
+    ESP_ERROR_CHECK(provision_certificates());
+
     // Configure watchdog timer
     ESP_LOGI(TAG, "Configuring watchdog timer...");
+
+    // Delete the old watchdog timer first
+    esp_task_wdt_deinit();
+
+    // Configure new watchdog timer
     esp_task_wdt_config_t twdt_config = {
         .timeout_ms = 30000,              // 30 second timeout
         .trigger_panic = false            // Don't panic on timeout
@@ -712,7 +858,7 @@ void app_main(void) {
     esp_tls_init_global_ca_store();
 
     // Connect to WiFi
-    ESP_LOGI(TAG, "Connecting to WiFi: %s", WIFI_SSID);
+    ESP_LOGI(TAG, "Connecting to WiFi (trying %d networks)...", WIFI_NETWORKS_COUNT);
     wifi_init();
 
     // Initialize HTTP clients
@@ -742,16 +888,7 @@ void app_main(void) {
 
     // Configure ADC for analog sensors
     ESP_LOGI(TAG, "Setting up ADC for sensors...");
-    adc1_config_width(ADC_WIDTH_BIT_12);
-
-    // Configure ADC channels with 11dB attenuation for higher voltage range
-    adc1_config_channel_atten(PH_ADC_CH, ADC_ATTEN_DB_11);
-    adc1_config_channel_atten(DO_ADC_CH, ADC_ATTEN_DB_11);
-    adc1_config_channel_atten(TURBIDITY_ADC_CH, ADC_ATTEN_DB_11);
-    adc1_config_channel_atten(AMMONIA_ADC_CH, ADC_ATTEN_DB_11);
-
-    // Characterize ADC
-    esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc_chars);
+    ESP_ERROR_CHECK(init_adc());
 
     // Sensor variables
     float air_temp = 0, hum = 0, water_temp = 0;

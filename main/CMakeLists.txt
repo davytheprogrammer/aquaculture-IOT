@@ -1,3 +1,13 @@
 idf_component_register(SRCS "aquaculture_monitor.c"
+                    "cert_manager.c"
+                    "provision_certs.c"
                     INCLUDE_DIRS "."
-                    REQUIRES "esp_http_client" "mbedtls" "esp-tls")
+                    REQUIRES "esp_http_client"
+                            "mbedtls"
+                            "esp-tls"
+                            "nvs_flash"
+                            "driver"
+                            "esp_adc"
+                            "esp_wifi"
+                            "esp_event"
+                            "esp_timer")

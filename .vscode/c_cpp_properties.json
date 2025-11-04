@@ -1,0 +1,33 @@
+{
+    "version": 4,
+    "configurations": [
+        {
+            "name": "ESP-IDF",
+            "compilerPath": "C:/Espressif/tools/xtensa-esp-elf-gdb/12.1_20221002/xtensa-esp-elf-gdb/bin/xtensa-esp32s3-elf-gcc.exe",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/Espressif/frameworks/esp-idf-v5.5/**",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/**",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/freertos/FreeRTOS-Kernel/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_wifi/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_common/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_system/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/driver/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_adc/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_event/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_http_client/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/esp_timer/include",
+                "C:/Espressif/frameworks/esp-idf-v5.5/components/nvs_flash/include",
+                "${workspaceFolder}/build/config"
+            ],
+            "defines": [
+                "ESP_PLATFORM",
+                "ESP32S3",
+                "_GNU_SOURCE"
+            ],
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-x64"
+        }
+    ]
+}
