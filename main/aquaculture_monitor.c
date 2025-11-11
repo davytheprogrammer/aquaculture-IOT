@@ -52,7 +52,7 @@ wifi_cred_t wifi_networks[] = {
 // Digital Sensors
 #define DHT_PIN GPIO_NUM_4                    // DHT22 for air temp & humidity
 #define WATER_TEMP_PIN GPIO_NUM_5             // DS18B20 water temperature sensor
-#define PUMP_PIN GPIO_NUM_6                   // DC pump control
+#define PUMP_PIN GPIO_NUM_14                  // DC pump control
 
 // Note: Analog sensor channels are defined in adc_config.h
 
@@ -391,13 +391,172 @@ static float read_ammonia(void) {
     return (nh3 >= 0.0f && nh3 <= 10.0f) ? nh3 : -1.0f;
 }
 
-// Water Temperature (DS18B20)
+// DS18B20 timing constants (in microseconds)
+#define DS18B20_RESET_PULSE 480
+#define DS18B20_PRESENCE_WAIT 60
+#define DS18B20_PRESENCE_PULSE 240
+#define DS18B20_WRITE_0 60
+#define DS18B20_WRITE_1 10
+#define DS18B20_READ_SLOT 15
+#define DS18B20_RECOVERY_TIME 1
+
+// DS18B20 CRC lookup table
+static const uint8_t ds18b20_crc_table[256] = {
+    0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
+    0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
+    0x9D, 0xC3, 0x21, 0x7F, 0xFC, 0xA2, 0x40, 0x1E,
+    0x5F, 0x01, 0xE3, 0xBD, 0x3E, 0x60, 0x82, 0xDC,
+    0x23, 0x7D, 0x9F, 0xC1, 0x42, 0x1C, 0xFE, 0xA0,
+    0xE1, 0xBF, 0x5D, 0x03, 0x80, 0xDE, 0x3C, 0x62,
+    0xBE, 0xE0, 0x02, 0x5C, 0xDF, 0x81, 0x63, 0x3D,
+    0x7C, 0x22, 0xC0, 0x9E, 0x1D, 0x43, 0xA1, 0xFF,
+    0x46, 0x18, 0xFA, 0xA4, 0x27, 0x79, 0x9B, 0xC5,
+    0x84, 0xDA, 0x38, 0x66, 0xE5, 0xBB, 0x59, 0x07,
+    0xDB, 0x85, 0x67, 0x39, 0xBA, 0xE4, 0x06, 0x58,
+    0x19, 0x47, 0xA5, 0xFB, 0x78, 0x26, 0xC4, 0x9A,
+    0x65, 0x3B, 0xD9, 0x87, 0x04, 0x5A, 0xB8, 0xE6,
+    0xA7, 0xF9, 0x1B, 0x45, 0xC6, 0x98, 0x7A, 0x24,
+    0xF8, 0xA6, 0x44, 0x1A, 0x99, 0xC7, 0x25, 0x7B,
+    0x3A, 0x64, 0x86, 0xD8, 0x5B, 0x05, 0xE7, 0xB9,
+    0x8C, 0xD2, 0x30, 0x6E, 0xED, 0xB3, 0x51, 0x0F,
+    0x4E, 0x10, 0xF2, 0xAC, 0x2F, 0x71, 0x93, 0xCD,
+    0x11, 0x4F, 0xAD, 0xF3, 0x70, 0x2E, 0xCC, 0x92,
+    0xD3, 0x8D, 0x6F, 0x31, 0xB2, 0xEC, 0x0E, 0x50,
+    0xAF, 0xF1, 0x13, 0x4D, 0xCE, 0x90, 0x72, 0x2C,
+    0x6D, 0x33, 0xD1, 0x8F, 0x0C, 0x52, 0xB0, 0xEE,
+    0x32, 0x6C, 0x8E, 0xD0, 0x53, 0x0D, 0xEF, 0xB1,
+    0xF0, 0xAE, 0x4C, 0x12, 0x91, 0xCF, 0x2D, 0x73,
+    0xCA, 0x94, 0x76, 0x28, 0xAB, 0xF5, 0x17, 0x49,
+    0x08, 0x56, 0xB4, 0xEA, 0x69, 0x37, 0xD5, 0x8B,
+    0x57, 0x09, 0xEB, 0xB5, 0x36, 0x68, 0x8A, 0xD4,
+    0x95, 0xCB, 0x29, 0x77, 0xF4, 0xAA, 0x48, 0x16,
+    0xE9, 0xB7, 0x55, 0x0B, 0x88, 0xD6, 0x34, 0x6A,
+    0x2B, 0x75, 0x97, 0xC9, 0x4A, 0x14, 0xF6, 0xA8,
+    0x74, 0x2A, 0xC8, 0x96, 0x15, 0x4B, 0xA9, 0xF7,
+    0xB6, 0xE8, 0x0A, 0x54, 0xD7, 0x89, 0x6B, 0x35
+};
+
+// Helper functions for DS18B20 1-wire protocol
+static void write_ds18b20_bit(int gpio_pin, int bit) {
+    gpio_set_direction(gpio_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(gpio_pin, 0);
+    ets_delay_us(bit ? DS18B20_WRITE_1 : DS18B20_WRITE_0);
+    gpio_set_level(gpio_pin, 1);
+    ets_delay_us(DS18B20_RECOVERY_TIME);
+}
+
+static int read_ds18b20_bit(int gpio_pin) {
+    gpio_set_direction(gpio_pin, GPIO_MODE_OUTPUT);
+    gpio_set_level(gpio_pin, 0);
+    ets_delay_us(DS18B20_READ_SLOT);
+    gpio_set_level(gpio_pin, 1);
+    gpio_set_direction(gpio_pin, GPIO_MODE_INPUT);
+    ets_delay_us(DS18B20_READ_SLOT / 2);
+    int bit = gpio_get_level(gpio_pin);
+    ets_delay_us(DS18B20_READ_SLOT / 2);
+    return bit;
+}
+
+// Water Temperature (DS18B20) - 1-Wire Protocol Implementation
 static float read_water_temp(void) {
-    // Note: This is a simplified implementation. For production,
-    // implement full DS18B20 1-wire protocol
-    float temp = 25.0f; // Default value
-    // TODO: Implement DS18B20 reading protocol
-    return temp;
+    uint8_t data[9] = {0};
+    int64_t start_time;
+
+    // Initialize GPIO for 1-wire
+    gpio_set_direction(WATER_TEMP_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(WATER_TEMP_PIN, 1);
+    vTaskDelay(pdMS_TO_TICKS(10)); // Stabilization delay
+
+    // Reset pulse
+    gpio_set_level(WATER_TEMP_PIN, 0);
+    ets_delay_us(DS18B20_RESET_PULSE);
+    gpio_set_level(WATER_TEMP_PIN, 1);
+    gpio_set_direction(WATER_TEMP_PIN, GPIO_MODE_INPUT);
+
+    // Wait for presence pulse
+    start_time = esp_timer_get_time();
+    while (gpio_get_level(WATER_TEMP_PIN) == 1) {
+        if (esp_timer_get_time() - start_time > DS18B20_PRESENCE_WAIT) {
+            ESP_LOGE(TAG, "DS18B20: No presence pulse detected on GPIO %d", WATER_TEMP_PIN);
+            return -999.0f;
+        }
+    }
+
+    start_time = esp_timer_get_time();
+    while (gpio_get_level(WATER_TEMP_PIN) == 0) {
+        if (esp_timer_get_time() - start_time > DS18B20_PRESENCE_PULSE) {
+            ESP_LOGE(TAG, "DS18B20: Presence pulse timeout on GPIO %d", WATER_TEMP_PIN);
+            return -999.0f;
+        }
+    }
+
+    // Send SKIP ROM command (0xCC)
+    for (int i = 0; i < 8; i++) {
+        write_ds18b20_bit(WATER_TEMP_PIN, (0xCC >> i) & 1);
+    }
+
+    // Send CONVERT T command (0x44)
+    for (int i = 0; i < 8; i++) {
+        write_ds18b20_bit(WATER_TEMP_PIN, (0x44 >> i) & 1);
+    }
+
+    // Wait for conversion (750ms max)
+    vTaskDelay(pdMS_TO_TICKS(750));
+
+    // Reset and presence again
+    gpio_set_direction(WATER_TEMP_PIN, GPIO_MODE_OUTPUT);
+    gpio_set_level(WATER_TEMP_PIN, 0);
+    ets_delay_us(DS18B20_RESET_PULSE);
+    gpio_set_level(WATER_TEMP_PIN, 1);
+    gpio_set_direction(WATER_TEMP_PIN, GPIO_MODE_INPUT);
+
+    start_time = esp_timer_get_time();
+    while (gpio_get_level(WATER_TEMP_PIN) == 1) {
+        if (esp_timer_get_time() - start_time > DS18B20_PRESENCE_WAIT) {
+            ESP_LOGE(TAG, "DS18B20: No presence pulse after conversion on GPIO %d", WATER_TEMP_PIN);
+            return -999.0f;
+        }
+    }
+
+    // Send SKIP ROM again
+    for (int i = 0; i < 8; i++) {
+        write_ds18b20_bit(WATER_TEMP_PIN, (0xCC >> i) & 1);
+    }
+
+    // Send READ SCRATCHPAD command (0xBE)
+    for (int i = 0; i < 8; i++) {
+        write_ds18b20_bit(WATER_TEMP_PIN, (0xBE >> i) & 1);
+    }
+
+    // Read 9 bytes of scratchpad
+    for (int byte = 0; byte < 9; byte++) {
+        for (int bit = 0; bit < 8; bit++) {
+            data[byte] |= (read_ds18b20_bit(WATER_TEMP_PIN) << bit);
+        }
+    }
+
+    // Verify CRC
+    uint8_t crc = 0;
+    for (int i = 0; i < 8; i++) {
+        crc = ds18b20_crc_table[crc ^ data[i]];
+    }
+    if (crc != data[8]) {
+        ESP_LOGE(TAG, "DS18B20: CRC check failed on GPIO %d", WATER_TEMP_PIN);
+        return -999.0f;
+    }
+
+    // Convert temperature
+    int16_t raw_temp = (data[1] << 8) | data[0];
+    float temperature = raw_temp / 16.0f;
+
+    if (temperature < -55.0f || temperature > 125.0f) {
+        ESP_LOGE(TAG, "DS18B20: Invalid temperature reading: %.2f°C on GPIO %d", temperature, WATER_TEMP_PIN);
+        return -999.0f;
+    }
+
+    ESP_LOGI(TAG, "DS18B20: Raw data: %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8]);
+    return temperature;
 }
 
 // Global HTTP client for reuse
@@ -475,15 +634,15 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
         return false;
     }
 
-    // Validate all sensor values
-    if (air_temp < -40 || air_temp > 80 ||
-        water_temp < -40 || water_temp > 80 ||
-        hum < 0 || hum > 100 ||
-        ph < 0 || ph > 14 ||
-        do_level < 0 || do_level > 20 ||
-        turbidity < 0 || turbidity > 1000 ||
-        ammonia < 0 || ammonia > 10) {
-        ESP_LOGE(TAG, "Invalid sensor values");
+    // Validate all sensor values (allow -999.0f for sensor errors)
+    if ((air_temp < -40 && air_temp != -999.0f) || air_temp > 80 ||
+        (water_temp < -40 && water_temp != -999.0f) || water_temp > 80 ||
+        (hum < 0 && hum != -999.0f) || hum > 100 ||
+        (ph < 0 && ph != -999.0f) || ph > 14 ||
+        (do_level < 0 && do_level != -999.0f) || do_level > 20 ||
+        (turbidity < 0 && turbidity != -999.0f) || turbidity > 1000 ||
+        (ammonia < 0 && ammonia != -999.0f) || ammonia > 10) {
+        ESP_LOGE(TAG, "Invalid sensor values detected");
         return false;
     }
 
@@ -499,14 +658,6 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
 
     // Water temperature and pH
     snprintf(temp, sizeof(temp), "\"water_temperature\":%.2f,\"ph\":%.2f,", water_temp, ph);
-    strcat(json, temp);
-
-    // DO and turbidity
-    snprintf(temp, sizeof(temp), "\"dissolved_oxygen\":%.2f,\"turbidity\":%.2f,", do_level, turbidity);
-    strcat(json, temp);
-
-    // Ammonia
-    snprintf(temp, sizeof(temp), "\"ammonia\":%.2f,", ammonia);
     strcat(json, temp);
 
     // Control states
@@ -921,9 +1072,10 @@ void app_main(void) {
         ESP_LOGI(TAG, "Reading DHT22 sensor...");
         esp_err_t dht_result = dht22_read(&hum, &air_temp);
         if (dht_result != ESP_OK) {
-            ESP_LOGW(TAG, "DHT22 READ FAILED - Using dummy values");
-            air_temp = 26.2f + ((float)esp_random() / UINT32_MAX - 0.5f);
-            hum = 72.9f + ((float)esp_random() / UINT32_MAX - 0.5f);
+            ESP_LOGE(TAG, "DHT22 READ FAILED - Sensor not responding (GPIO %d)", DHT_PIN);
+            ESP_LOGE(TAG, "Error: %s", esp_err_to_name(dht_result));
+            air_temp = -999.0f; // Error indicator
+            hum = -999.0f;      // Error indicator
         }
         ESP_LOGI(TAG, "Air Temp: %.1f°C, Humidity: %.1f%%", air_temp, hum);
         esp_task_wdt_reset();
@@ -938,40 +1090,48 @@ void app_main(void) {
         ESP_LOGI(TAG, "Reading pH...");
         ph = read_ph();
         if (ph < 0) {
-            ESP_LOGW(TAG, "pH sensor error - Using default");
-            ph = 7.0f;
+            ESP_LOGE(TAG, "pH sensor error - ADC channel %d (GPIO %d) reading failed", PH_ADC_CH, 6);
+            ESP_LOGE(TAG, "Check sensor connection, power supply, and calibration");
+            ph = -999.0f; // Error indicator
+        } else {
+            ESP_LOGI(TAG, "pH: %.2f (connected and working)", ph);
         }
-        ESP_LOGI(TAG, "pH: %.2f", ph);
         esp_task_wdt_reset();
 
         // Read Dissolved Oxygen
         ESP_LOGI(TAG, "Reading dissolved oxygen...");
         do_level = read_do();
         if (do_level < 0) {
-            ESP_LOGW(TAG, "DO sensor error - Using default");
-            do_level = 8.0f;
+            ESP_LOGE(TAG, "DO sensor error - ADC channel %d (GPIO %d) reading failed", DO_ADC_CH, 3);
+            ESP_LOGE(TAG, "Sensor not connected yet - will be available when DO sensor is added");
+            do_level = -999.0f; // Error indicator
+        } else {
+            ESP_LOGI(TAG, "DO: %.2f mg/L (connected and working)", do_level);
         }
-        ESP_LOGI(TAG, "DO: %.2f mg/L", do_level);
         esp_task_wdt_reset();
 
         // Read Turbidity
         ESP_LOGI(TAG, "Reading turbidity...");
         turbidity = read_turbidity();
         if (turbidity < 0) {
-            ESP_LOGW(TAG, "Turbidity sensor error - Using default");
-            turbidity = 10.0f;
+            ESP_LOGE(TAG, "Turbidity sensor error - ADC channel %d (GPIO %d) reading failed", TURBIDITY_ADC_CH, 8);
+            ESP_LOGE(TAG, "Check sensor connection, power supply, and calibration");
+            turbidity = -999.0f; // Error indicator
+        } else {
+            ESP_LOGI(TAG, "Turbidity: %.2f NTU (connected and working)", turbidity);
         }
-        ESP_LOGI(TAG, "Turbidity: %.2f NTU", turbidity);
         esp_task_wdt_reset();
 
         // Read Ammonia
         ESP_LOGI(TAG, "Reading ammonia...");
         ammonia = read_ammonia();
         if (ammonia < 0) {
-            ESP_LOGW(TAG, "Ammonia sensor error - Using default");
-            ammonia = 0.5f;
+            ESP_LOGE(TAG, "Ammonia sensor error - ADC channel %d (GPIO %d) reading failed", AMMONIA_ADC_CH, 1);
+            ESP_LOGE(TAG, "Sensor not connected yet - will be available when ammonia sensor is added");
+            ammonia = -999.0f; // Error indicator
+        } else {
+            ESP_LOGI(TAG, "Ammonia: %.2f mg/L (connected and working)", ammonia);
         }
-        ESP_LOGI(TAG, "Ammonia: %.2f mg/L", ammonia);
         esp_task_wdt_reset();
 
         // Control System Logic
