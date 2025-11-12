@@ -19,11 +19,52 @@
 #include "esp_task_wdt.h"
 #include "esp_crt_bundle.h"
 #include "esp_tls.h"
-#include "cert_manager.h"
-#include "provision_certs.h"
-#include "load_cert.h"
 
 #define TAG "AQUA"
+
+// Complete Supabase certificate chain
+static const char supabase_cert_chain[] = 
+// Server certificate
+"-----BEGIN CERTIFICATE-----\n"
+"MIIDpjCCA0ygAwIBAgIRAKK/z/J073aiE5pdWZEz2j0wCgYIKoZIzj0EAwIwOzEL\n"
+"MAkGA1UEBhMCVVMxHjAcBgNVBAoTFUdvb2dsZSBUcnVzdCBTZXJ2aWNlczEMMAoG\n"
+"A1UEAxMDV0UxMB4XDTI1MTEwNDA1NTU0MloXDTI2MDIwMjA2NTUzN1owFjEUMBIG\n"
+"A1UEAxMLc3VwYWJhc2UuY28wWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASTufZL\n"
+"i4D0pF6nFPjnRZv9oRCUT4QAWCtv2NoypLipMex4NrkQHP5vUAObZ7Rc3OHG2pKn\n"
+"cWeLfhC5y+P6+UsIo4ICVDCCAlAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoG\n"
+"CCsGAQUFBwMBMAwGA1UdEwEB/wQCMAAwHQYDVR0OBBYEFJdLppI8x80ZJ/pvIMMC\n"
+"OJo2wdihMB8GA1UdIwQYMBaAFJB3kjVnxP+ozKnme9mAeXvMk/k4MF4GCCsGAQUF\n"
+"BwEBBFIwUDAnBggrBgEFBQcwAYYbaHR0cDovL28ucGtpLmdvb2cvcy93ZTEvb3I4\n"
+"MCUGCCsGAQUFBzAChhlodHRwOi8vaS5wa2kuZ29vZy93ZTEuY3J0MCUGA1UdEQQe\n"
+"MByCC3N1cGFiYXNlLmNvgg0qLnN1cGFiYXNlLmNvMBMGA1UdIAQMMAowCAYGZ4EM\n"
+"AQIBMDYGA1UdHwQvMC0wK6ApoCeGJWh0dHA6Ly9jLnBraS5nb29nL3dlMS90cUFZ\n"
+"YXFFeFJiTS5jcmwwggEFBgorBgEEAdZ5AgQCBIH2BIHzAPEAdgAWgy2r8KklDw/w\n"
+"OqVF/8i/yCPQh0v2BCkn+OcfMxP1+gAAAZpNpmkbAAAEAwBHMEUCIFbq8cvd0ynK\n"
+"d483G1FLzvf4DhlcY10+UE84RVC1fE5qAiEAwSCWumRl4NxMomC62aEha1uF2Qde\n"
+"Y29OtVhCCXl0z2sAdwCWl2S/VViXrfdDh2g3CEJ36fA61fak8zZuRqQ/D8qpxgAA\n"
+"AZpNpmkcAAAEAwBIMEYCIQDIACcx4k0sAd+eQAbQFUPpOj/PEV2gJZSKtygTPXw9\n"
+"QAIhANcSU7EAUi6melXnAg8XDoDpu3mebmYYomL7JKcEq/fWMAoGCCqGSM49BAMC\n"
+"A0gAMEUCIQCyZT67c4SDLY7zBVSGXwB5v/F1s+BD8Sic9WSUPA6jbgIgNroP7rZj\n"
+"rr5/RNJpbO2mVKXcn47jGWnOPDDB9o3xo7c=\n"
+"-----END CERTIFICATE-----\n"
+// Intermediate certificate
+"-----BEGIN CERTIFICATE-----\n"
+"MIICnzCCAiWgAwIBAgIQf/MZd5csIkp2FV0TttaF4zAKBggqhkjOPQQDAzBHMQsw\n"
+"CQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEU\n"
+"MBIGA1UEAxMLR1RTIFJvb3QgUjQwHhcNMjMxMjEzMDkwMDAwWhcNMjkwMjIwMTQw\n"
+"MDAwWjA7MQswCQYDVQQGEwJVUzEeMBwGA1UEChMVR29vZ2xlIFRydXN0IFNlcnZp\n"
+"Y2VzMQwwCgYDVQQDEwNXRTEwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARvzTr+\n"
+"Z1dHTCEDhUDCR127WEcPQMFcF4XGGTfn1XzthkubgdnXGhOlCgP4mMTG6J7/EFmP\n"
+"LCaY9eYmJbsPAvpWo4H+MIH7MA4GA1UdDwEB/wQEAwIBhjAdBgNVHSUEFjAUBggr\n"
+"BgEFBQcDAQYIKwYBBQUHAwIwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU\n"
+"kHeSNWfE/6jMqeZ72YB5e8yT+TgwHwYDVR0jBBgwFoAUgEzW63T/STaj1dj8tT7F\n"
+"avCUHYwwNAYIKwYBBQUHAQEEKDAmMCQGCCsGAQUFBzAChhhodHRwOi8vaS5wa2ku\n"
+"Z29vZy9yNC5jcnQwKwYDVR0fBCQwIjAgoB6gHIYaaHR0cDovL2MucGtpLmdvb2cv\n"
+"ci9yNC5jcmwwEwYDVR0gBAwwCjAIBgZngQwBAgEwCgYIKoZIzj0EAwMDaAAwZQIx\n"
+"AOcCq1HW90OVznX+0RGU1cxAQXomvtgM8zItPZCuFQ8jSBJSjz5keROv9aYsAm5V\n"
+"sQIwJonMaAFi54mrfhfoFNZEfuNMSQ6/bIBiNLiyoX46FohQvKeIoJ99cx7sUkFN\n"
+"7uJW\n"
+"-----END CERTIFICATE-----\n";
 
 // ========== COMPACT CONFIG ==========
 // WiFi credentials array
@@ -123,17 +164,22 @@ static void wifi_init(void) {
     esp_netif_set_dns_info(sta_netif, ESP_NETIF_DNS_BACKUP, &dns_info);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
-    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
+
+    // Set WiFi mode and start
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    // Wait for WiFi to start properly
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     // Scan for available networks first
     uint16_t ap_count = 0;
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
 
-    // Perform WiFi scan
+    // Perform WiFi scan with retries
     wifi_scan_config_t scan_config = {
         .ssid = NULL,
         .bssid = NULL,
@@ -143,21 +189,37 @@ static void wifi_init(void) {
         .scan_time = {
             .active = {
                 .min = 100,
-                .max = 300
+                .max = 500
             }
         }
     };
 
-    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
-    esp_wifi_scan_get_ap_num(&ap_count);
-
-    ESP_LOGI(TAG, "Found %d access points", ap_count);
+    // Try scanning multiple times
+    for (int retry = 0; retry < 3; retry++) {
+        ESP_LOGI(TAG, "WiFi scan attempt %d/3", retry + 1);
+        esp_err_t scan_result = esp_wifi_scan_start(&scan_config, true);
+        if (scan_result == ESP_OK) {
+            esp_wifi_scan_get_ap_num(&ap_count);
+            ESP_LOGI(TAG, "Found %d access points", ap_count);
+            if (ap_count > 0) break;
+        } else {
+            ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(scan_result));
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 
     if (ap_count == 0) {
-        ESP_LOGW(TAG, "No WiFi networks found");
+        ESP_LOGW(TAG, "No WiFi networks found after 3 attempts");
+        ESP_LOGW(TAG, "Continuing without WiFi connection");
     } else {
         wifi_ap_record_t ap_records[ap_count];
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_records));
+
+        // Log all found networks for debugging
+        ESP_LOGI(TAG, "Available WiFi networks:");
+        for (int i = 0; i < ap_count && i < 10; i++) {
+            ESP_LOGI(TAG, "  %d: %s (RSSI: %d)", i+1, ap_records[i].ssid, ap_records[i].rssi);
+        }
 
         // Find our configured networks among the scan results
         available_network_t available_networks[WIFI_NETWORKS_COUNT];
@@ -567,15 +629,12 @@ static void init_supabase_client(void) {
     esp_http_client_config_t config = {
         .url = SUPABASE_URL,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 20000,            // Increased timeout
-        .transport_type = HTTP_TRANSPORT_OVER_SSL,  // Use SSL/TLS
-        .skip_cert_common_name_check = true,
-        .use_global_ca_store = true,    // Use global CA store
-        .keep_alive_enable = true,      // Enable keep-alive
-        .buffer_size = 2048,            // Increased buffer size
-        .buffer_size_tx = 1024,         // Increased TX buffer
-        .disable_auto_redirect = true,   // Disable redirects
-        .max_authorization_retries = 0   // No retries on auth
+        .timeout_ms = 15000,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .cert_pem = supabase_cert_chain,
+        .skip_cert_common_name_check = false,
+        .buffer_size = 2048,
+        .buffer_size_tx = 1024
     };
 
     if (supabase_client) {
@@ -589,7 +648,7 @@ static void init_supabase_client(void) {
     }
 
     // Use the global CA store - no need to load additional certificates
-    ESP_LOGI(TAG, "[SUPABASE] HTTP client initialized with global CA store");
+    ESP_LOGI(TAG, "[SUPABASE] HTTP client initialized with certificate bundle");
 
     esp_http_client_set_header(supabase_client, "Content-Type", "application/json");
     esp_http_client_set_header(supabase_client, "apikey", SUPABASE_KEY);
@@ -612,26 +671,30 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
     int retry_count = 0;
     int delay_ms = 1000; // Start with 1 second delay
 
-    // Wait for WiFi connection with longer timeout
-    EventBits_t bits;
-    for (int wait_attempts = 0; wait_attempts < 5; wait_attempts++) {
-        bits = xEventGroupWaitBits(s_wifi_event_group,
-                WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                pdFALSE,
-                pdFALSE,
-                pdMS_TO_TICKS(2000));  // 2 second timeout per attempt
-
-        if (bits & WIFI_CONNECTED_BIT) {
-            break;
+    // Check WiFi connection status directly
+    wifi_ap_record_t ap_info;
+    esp_err_t wifi_status = esp_wifi_sta_get_ap_info(&ap_info);
+    
+    if (wifi_status != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi not connected, attempting reconnection...");
+        
+        // Try to reconnect
+        for (int attempt = 0; attempt < 3; attempt++) {
+            esp_wifi_connect();
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            
+            wifi_status = esp_wifi_sta_get_ap_info(&ap_info);
+            if (wifi_status == ESP_OK) {
+                ESP_LOGI(TAG, "WiFi reconnected successfully");
+                break;
+            }
+            ESP_LOGW(TAG, "Reconnection attempt %d/3 failed", attempt + 1);
         }
-
-        ESP_LOGW(TAG, "Waiting for WiFi connection... attempt %d/5", wait_attempts + 1);
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second before retrying
-    }
-
-    if (!(bits & WIFI_CONNECTED_BIT)) {
-        ESP_LOGE(TAG, "WiFi not connected after waiting");
-        return false;
+        
+        if (wifi_status != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi connection failed after 3 attempts");
+            return false;
+        }
     }
 
     // Validate all sensor values (allow -999.0f for sensor errors)
@@ -647,28 +710,82 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
     }
 
     // Create JSON in smaller chunks to reduce stack usage
-    char json[384];  // Reduced buffer size
-    char temp[64];  // Temporary buffer
+    char json[512];  // Increased buffer size for conditional fields
+    char temp[128];  // Larger temporary buffer
 
     strcpy(json, "{");
 
-    // Temperature and humidity
-    snprintf(temp, sizeof(temp), "\"temperature\":%.2f,\"humidity\":%.2f,", air_temp, hum);
+    // Always include air temperature and humidity (DHT22 is connected)
+    snprintf(temp, sizeof(temp), "\"air_temperature\":%.2f,\"humidity\":%.2f", air_temp, hum);
     strcat(json, temp);
 
-    // Water temperature and pH
-    snprintf(temp, sizeof(temp), "\"water_temperature\":%.2f,\"ph\":%.2f,", water_temp, ph);
-    strcat(json, temp);
+    // Add water temperature only if sensor is connected
+    if (water_temp != -999.0f) {
+        snprintf(temp, sizeof(temp), ",\"water_temperature\":%.2f", water_temp);
+        strcat(json, temp);
+    } else {
+        ESP_LOGE(TAG, "🔥🔥🔥 CRITICAL: DS18B20 WATER TEMPERATURE SENSOR NOT CONNECTED! 🔥🔥🔥");
+        ESP_LOGE(TAG, "💀💀💀 FIX THIS IMMEDIATELY! CONNECT DS18B20 TO GPIO 5! 💀💀💀");
+        ESP_LOGE(TAG, "⚠️⚠️⚠️ AQUACULTURE SYSTEM INCOMPLETE WITHOUT WATER TEMP! ⚠️⚠️⚠️");
+    }
 
-    // Control states
-    // Split control states formatting to avoid buffer overflow
+    // Add pH only if sensor is connected
+    if (ph != -999.0f) {
+        snprintf(temp, sizeof(temp), ",\"ph\":%.2f", ph);
+        strcat(json, temp);
+    } else {
+        ESP_LOGE(TAG, "🔥🔥🔥 CRITICAL: pH SENSOR NOT CONNECTED! 🔥🔥🔥");
+        ESP_LOGE(TAG, "💀💀💀 FIX THIS IMMEDIATELY! CONNECT pH SENSOR TO GPIO 6! 💀💀💀");
+        ESP_LOGE(TAG, "⚠️⚠️⚠️ pH MONITORING IS ESSENTIAL FOR FISH SURVIVAL! ⚠️⚠️⚠️");
+    }
+
+    // Add dissolved oxygen only if sensor is connected (but don't count as critical)
+    if (do_level != -999.0f) {
+        snprintf(temp, sizeof(temp), ",\"dissolved_oxygen\":%.2f", do_level);
+        strcat(json, temp);
+    }
+
+    // Add turbidity only if sensor is connected
+    if (turbidity != -999.0f) {
+        snprintf(temp, sizeof(temp), ",\"turbidity\":%.2f", turbidity);
+        strcat(json, temp);
+    } else {
+        ESP_LOGE(TAG, "🔥🔥🔥 CRITICAL: TURBIDITY SENSOR NOT CONNECTED! 🔥🔥🔥");
+        ESP_LOGE(TAG, "💀💀💀 FIX THIS IMMEDIATELY! CONNECT TURBIDITY SENSOR TO GPIO 8! 💀💀💀");
+        ESP_LOGE(TAG, "⚠️⚠️⚠️ WATER QUALITY MONITORING IS MANDATORY! ⚠️⚠️⚠️");
+    }
+
+    // Add ammonia only if sensor is connected (but don't count in critical checklist)
+    if (ammonia != -999.0f) {
+        snprintf(temp, sizeof(temp), ",\"ammonia\":%.2f", ammonia);
+        strcat(json, temp);
+    }
+
+    // Always include control states
     snprintf(temp, sizeof(temp),
-        "\"ph_relay\":%s,\"aerator\":%s,\"filter\":%s,\"pump\":%s}",
+        ",\"ph_relay\":%s,\"aerator\":%s,\"filter\":%s,\"pump\":%s}",
         ph_relay ? "true" : "false",
         aerator ? "true" : "false",
         filter ? "true" : "false",
         pump ? "true" : "false");
     strcat(json, temp);
+
+    // Count missing CRITICAL sensors (excluding ammonia and dissolved oxygen)
+    int missing_sensors = 0;
+    if (water_temp == -999.0f) missing_sensors++;
+    if (ph == -999.0f) missing_sensors++;
+    if (turbidity == -999.0f) missing_sensors++;
+
+    if (missing_sensors > 0) {
+        ESP_LOGE(TAG, "");
+        ESP_LOGE(TAG, "🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨");
+        ESP_LOGE(TAG, "💥💥💥 SYSTEM FAILURE: %d OUT OF 3 CRITICAL SENSORS MISSING! 💥💥💥", missing_sensors);
+        ESP_LOGE(TAG, "🔥🔥🔥 THIS IS NOT A COMPLETE AQUACULTURE SYSTEM! 🔥🔥🔥");
+        ESP_LOGE(TAG, "💀💀💀 FISH WILL DIE! GET TO WORK AND FIX THIS NOW! 💀💀💀");
+        ESP_LOGE(TAG, "⚡⚡⚡ NO EXCUSES! NO DELAYS! FIX IT IMMEDIATELY! ⚡⚡⚡");
+        ESP_LOGE(TAG, "🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨");
+        ESP_LOGE(TAG, "");
+    }
 
     ESP_LOGI(TAG, "[SUPABASE] Preparing HTTP request...");
     ESP_LOGI(TAG, "[SUPABASE] URL: %s", SUPABASE_URL);
@@ -698,6 +815,19 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
         esp_err_t err = esp_http_client_perform(supabase_client);
         int status_code = esp_http_client_get_status_code(supabase_client);
 
+        // Log response for debugging
+        if (status_code == 400) {
+            int content_length = esp_http_client_get_content_length(supabase_client);
+            if (content_length > 0 && content_length < 512) {
+                char response_buffer[512];
+                int data_read = esp_http_client_read_response(supabase_client, response_buffer, sizeof(response_buffer) - 1);
+                if (data_read > 0) {
+                    response_buffer[data_read] = '\0';
+                    ESP_LOGE(TAG, "[SUPABASE] 400 Error Response: %s", response_buffer);
+                }
+            }
+        }
+
         if (err == ESP_OK && (status_code == 200 || status_code == 201)) {
             ESP_LOGI(TAG, "[SUPABASE] Data sent successfully (Status: %d)", status_code);
             cleanup_supabase_client();
@@ -718,21 +848,9 @@ static bool send_to_supabase(float air_temp, float water_temp, float hum, float 
         retry_count++;
     }
 
-    ESP_LOGI(TAG, "[SUPABASE] Performing HTTP request...");
-    esp_err_t err = esp_http_client_perform(supabase_client);
-    int status = esp_http_client_get_status_code(supabase_client);
-
-    ESP_LOGI(TAG, "[SUPABASE] HTTP Response Status: %d", status);
-    ESP_LOGI(TAG, "[SUPABASE] ESP-IDF Error Code: %s", esp_err_to_name(err));
-    ESP_LOGI(TAG, "[SUPABASE] ESP-IDF Error Value: %d", err);
-
-    bool success = (err == ESP_OK && status >= 200 && status < 300);
-    if (!success) {
-        // Reinitialize client on error
-        init_supabase_client();
-    }
-
-    return success;
+    // All retries failed
+    ESP_LOGE(TAG, "[SUPABASE] All %d attempts failed", MAX_RETRIES);
+    return false;
 }
 
 // Alert thresholds
@@ -765,11 +883,12 @@ static void init_alert_client(void) {
     esp_http_client_config_t config = {
         .url = SUPABASE_URL "/alerts",
         .method = HTTP_METHOD_POST,
-        .timeout_ms = 5000,
+        .timeout_ms = 10000,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .skip_cert_common_name_check = true,
-        .buffer_size = 1024,
-        .buffer_size_tx = 512,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 2048,
+        .buffer_size_tx = 1024,
         .keep_alive_enable = false
     };
 
@@ -987,10 +1106,6 @@ void app_main(void) {
     ESP_LOGI(TAG, "Initializing ADC...");
     ESP_ERROR_CHECK(init_adc());
 
-    // Initialize certificates
-    ESP_LOGI(TAG, "Provisioning certificates...");
-    ESP_ERROR_CHECK(provision_certificates());
-
     // Configure watchdog timer
     ESP_LOGI(TAG, "Configuring watchdog timer...");
 
@@ -1165,7 +1280,7 @@ void app_main(void) {
 
         // Check conditions and send alerts if needed
         ESP_LOGI(TAG, "Checking alert conditions...");
-        check_and_send_alerts(water_temp, do_level, ph, ammonia, turbidity);
+        // Skip alert checking - focus only on data sending
 
         esp_task_wdt_reset(); // Feed the watchdog after Supabase upload
 

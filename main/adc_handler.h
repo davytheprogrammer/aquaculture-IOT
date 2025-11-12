@@ -29,7 +29,7 @@ esp_err_t init_adc() {
     // Configure ADC channels - match the channels defined in adc_config.h
     adc_oneshot_chan_cfg_t config = {
         .bitwidth = ADC_BITWIDTH_12,
-        .atten = ADC_ATTEN_DB_11,  // Use DB_11 for ESP32-S3
+        .atten = ADC_ATTEN_DB_12,  // Use DB_12 for ESP32-S3 (renamed from DB_11 in ESP-IDF v6.0)
     };
 
     // Configure all sensor ADC channels
