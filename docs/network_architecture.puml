@@ -1,0 +1,33 @@
+@startuml
+title Network and Security Architecture
+
+package "Local Network" {
+  component [ESP32-S3] as esp32
+  component [WiFi Router 1] as router1
+  component [WiFi Router 2] as router2
+}
+
+package "Internet" {
+  component [ISP Gateway] as isp
+  component [DNS Servers] as dns
+}
+
+package "Supabase Cloud" {
+  component [Load Balancer] as lb
+  component [API Gateway] as api_gw
+  component [REST API] as rest_api
+  component [PostgreSQL] as db
+}
+
+esp32 --> router1 : Primary WiFi
+esp32 --> router2 : Backup WiFi
+router1 --> isp
+router2 --> isp
+isp --> dns
+isp --> lb
+
+lb --> api_gw
+api_gw --> rest_api
+rest_api --> db
+
+@enduml

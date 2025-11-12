@@ -1,0 +1,69 @@
+@startuml
+title ESP32-S3 Aquaculture IoT System Architecture
+
+package "ESP32-S3 Hardware" {
+  component [ESP32-S3 MCU] as mcu
+  component [WiFi Module] as wifi
+  component [ADC Channels] as adc
+  component [GPIO Pins] as gpio
+}
+
+package "Sensors" {
+  component [DHT22] as dht22
+  component [DS18B20] as ds18b20
+  component [pH Sensor] as ph
+  component [Turbidity] as turbidity
+  component [Dissolved O2] as do
+  component [Ammonia] as ammonia
+}
+
+package "ESP-IDF Framework" {
+  component [FreeRTOS] as freertos
+  component [WiFi Driver] as wifi_driver
+  component [ADC Driver] as adc_driver
+  component [HTTP Client] as http_client
+  component [TLS/SSL] as tls
+}
+
+package "Application" {
+  component [Main Task] as main_task
+  component [WiFi Manager] as wifi_mgr
+  component [Sensor Handler] as sensor_handler
+  component [HTTP Manager] as http_mgr
+}
+
+package "Cloud" {
+  component [Supabase API] as supabase
+  component [PostgreSQL] as postgres
+}
+
+dht22 --> gpio
+ds18b20 --> gpio
+ph --> adc
+turbidity --> adc
+do --> adc
+ammonia --> adc
+
+gpio --> mcu
+adc --> mcu
+wifi --> mcu
+
+mcu --> freertos
+freertos --> wifi_driver
+freertos --> adc_driver
+freertos --> http_client
+freertos --> tls
+
+main_task --> wifi_mgr
+main_task --> sensor_handler
+main_task --> http_mgr
+
+wifi_mgr --> wifi_driver
+sensor_handler --> adc_driver
+http_mgr --> http_client
+http_client --> tls
+
+http_mgr --> supabase
+supabase --> postgres
+
+@enduml

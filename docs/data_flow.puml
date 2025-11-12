@@ -1,0 +1,60 @@
+@startuml
+title Aquaculture IoT Data Flow Process
+
+start
+
+:System Boot;
+:Initialize Hardware;
+:Configure WiFi Networks;
+:Setup ADC Channels;
+
+:Scan Available Networks;
+if (Network Found?) then (yes)
+  :Connect to WiFi;
+  if (Connection Success?) then (yes)
+    :Get IP Address;
+  else (no)
+    :Try Next Network;
+    stop
+  endif
+else (no)
+  :Wait and Retry;
+  stop
+endif
+
+:Initialize Sensors;
+
+repeat
+  :Read DHT22;
+  :Read DS18B20;
+  :Read pH Sensor;
+  :Read Turbidity;
+  :Read Dissolved O2;
+  :Read Ammonia;
+  
+  :Validate Sensor Data;
+  
+  if (Critical Sensors Missing?) then (yes)
+    :Log Error Messages;
+  endif
+  
+  :Construct JSON Payload;
+  
+  if (WiFi Connected?) then (yes)
+    :Send HTTPS POST;
+    if (Request Success?) then (yes)
+      :Log Success;
+    else (no)
+      :Retry Request;
+    endif
+  else (no)
+    :Reconnect WiFi;
+  endif
+  
+  :Wait 30 seconds;
+  
+repeat while (System Running?)
+
+stop
+
+@enduml
