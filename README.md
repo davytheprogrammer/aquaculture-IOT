@@ -90,6 +90,10 @@ The system is built around the ESP32-S3 microcontroller, featuring:
 
 ## 🧠 Software Architecture
 
+### System Architecture Overview
+
+![System Architecture](docs/images/system_architecture.png)
+
 ### System Components
 
 ```
@@ -102,6 +106,28 @@ The system is built around the ESP32-S3 microcontroller, featuring:
 ├─────────────────────────────────────────────────────────────┤
 │                    Hardware Abstraction                    │
 └─────────────────────────────────────────────────────────────┘
+```
+
+### Task Architecture & Memory Layout
+
+| Task Name | Priority | Stack Size | Core | Function |
+|-----------|----------|------------|------|----------|
+| **main_task** | 5 | 8192 bytes | Core 0 | Main application logic |
+| **wifi_task** | 4 | 4096 bytes | Core 0 | WiFi management |
+| **sensor_task** | 3 | 4096 bytes | Core 1 | Sensor reading |
+| **http_task** | 3 | 8192 bytes | Core 0 | HTTP communications |
+
+```c
+// Task Creation Example
+xTaskCreatePinnedToCore(
+    main_task,           // Task function
+    "main_task",         // Task name
+    8192,               // Stack size
+    NULL,               // Parameters
+    5,                  // Priority
+    NULL,               // Task handle
+    0                   // Core ID
+);
 ```
 
 ### Core Modules
@@ -136,6 +162,8 @@ The system is built around the ESP32-S3 microcontroller, featuring:
 
 ### Data Flow
 
+![Data Flow Process](docs/images/data_flow.png)
+
 ```mermaid
 graph TD
     A[Sensor Reading] --> B[Data Validation]
@@ -154,7 +182,57 @@ graph TD
     J --> E
 ```
 
+### Complete Implementation Flow
+
+```c
+void main_monitoring_loop(void) {
+    while (1) {
+        // 1. Read all sensors
+        float air_temp = read_dht22_temperature();
+        float humidity = read_dht22_humidity();
+        float water_temp = read_ds18b20_temperature();
+        float ph_value = read_ph_sensor();
+        float turbidity = read_turbidity_sensor();
+        
+        // 2. Validate sensor data
+        if (air_temp == -999.0) {
+            ESP_LOGW(TAG, "⚠️ DHT22 sensor disconnected");
+        }
+        if (water_temp == -999.0) {
+            ESP_LOGE(TAG, "🚨 CRITICAL: Water temperature sensor missing!");
+        }
+        
+        // 3. Construct JSON payload (exclude invalid readings)
+        cJSON *json = cJSON_CreateObject();
+        if (air_temp != -999.0) cJSON_AddNumberToObject(json, "air_temperature", air_temp);
+        if (humidity != -999.0) cJSON_AddNumberToObject(json, "humidity", humidity);
+        if (water_temp != -999.0) cJSON_AddNumberToObject(json, "water_temperature", water_temp);
+        if (ph_value != -999.0) cJSON_AddNumberToObject(json, "ph", ph_value);
+        if (turbidity != -999.0) cJSON_AddNumberToObject(json, "turbidity", turbidity);
+        
+        // 4. Send to Supabase
+        char *json_string = cJSON_Print(json);
+        bool success = send_to_supabase(json_string);
+        
+        if (success) {
+            ESP_LOGI(TAG, "✅ Data sent successfully!");
+        } else {
+            ESP_LOGE(TAG, "❌ Failed to send data");
+        }
+        
+        // 5. Cleanup and wait
+        free(json_string);
+        cJSON_Delete(json);
+        vTaskDelay(pdMS_TO_TICKS(30000)); // 30 second interval
+    }
+}
+```
+
 ## 🔬 Sensor Configuration
+
+### Sensor Accuracy Analysis
+
+![Sensor Accuracy](docs/images/sensor_accuracy.png)
 
 ### Critical Sensors (System will report errors if missing)
 
@@ -254,6 +332,10 @@ CREATE TABLE public.sensor_data (
 - **Boolean controls**: true/false only
 
 ## 🔐 Network & Security
+
+### Network Architecture
+
+![Network Architecture](docs/images/network_architecture.png)
 
 ### WiFi Configuration
 
@@ -425,6 +507,162 @@ ADC Channels (A0-A3):
     └──────────────── pH Sensor
 ```
 
+### Complete Sensor Implementation
+
+```c
+// DHT22 Reading Function
+float read_dht22_temperature(void) {
+    dht_data_t data;
+    if (dht_read_data(DHT_TYPE_DHT22, DHT_PIN, &data) == ESP_OK) {
+        return data.temperature;
+    }
+    return -999.0; // Error value
+}
+
+// DS18B20 Water Temperature
+float read_ds18b20_temperature(void) {
+    float temperature = 0;
+    ds18b20_requestTemperatures();
+    vTaskDelay(pdMS_TO_TICKS(750)); // Wait for conversion
+    
+    if (ds18b20_get_temp(&temperature)) {
+        return temperature;
+    }
+    return -999.0; // Error value
+}
+
+// pH Sensor ADC Reading
+float read_ph_sensor(void) {
+    int adc_raw = 0;
+    esp_err_t ret = adc_oneshot_read(adc1_handle, ADC_CHANNEL_0, &adc_raw);
+    if (ret == ESP_OK) {
+        int voltage_mv = 0;
+        adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, &voltage_mv);
+        
+        // Convert voltage to pH (calibration required)
+        float ph = 7.0 + ((2500 - voltage_mv) / 59.16); // Theoretical conversion
+        return (ph >= 0 && ph <= 14) ? ph : -999.0;
+    }
+    return -999.0;
+}
+
+// Turbidity Sensor
+float read_turbidity_sensor(void) {
+    int adc_raw = 0;
+    esp_err_t ret = adc_oneshot_read(adc1_handle, ADC_CHANNEL_1, &adc_raw);
+    if (ret == ESP_OK) {
+        int voltage_mv = 0;
+        adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, &voltage_mv);
+        
+        // Convert voltage to NTU (sensor-specific calibration)
+        float turbidity = (voltage_mv < 2500) ? 
+            (2500 - voltage_mv) / 1000.0 * 400 : 0;
+        return turbidity;
+    }
+    return -999.0;
+}
+```
+
+### WiFi Implementation
+
+```c
+// WiFi Event Handler
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                              int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        ESP_LOGI(TAG, "WiFi disconnected, attempting reconnection...");
+        esp_wifi_connect();
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "✅ WiFi connected! IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        wifi_connected = true;
+    }
+}
+
+// Multi-Network Connection
+bool connect_to_wifi(void) {
+    for (int i = 0; i < WIFI_NETWORKS_COUNT; i++) {
+        ESP_LOGI(TAG, "📡 Attempting connection to: %s", wifi_networks[i].ssid);
+        
+        wifi_config_t wifi_config = {0};
+        strcpy((char*)wifi_config.sta.ssid, wifi_networks[i].ssid);
+        strcpy((char*)wifi_config.sta.password, wifi_networks[i].password);
+        
+        esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+        esp_wifi_connect();
+        
+        // Wait for connection with timeout
+        int timeout = WIFI_TIMEOUT_MS / 100;
+        while (timeout-- > 0 && !wifi_connected) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        
+        if (wifi_connected) {
+            ESP_LOGI(TAG, "✅ Connected to: %s", wifi_networks[i].ssid);
+            return true;
+        }
+        
+        ESP_LOGW(TAG, "❌ Failed to connect to: %s", wifi_networks[i].ssid);
+    }
+    return false;
+}
+```
+
+### HTTP/HTTPS Implementation
+
+```c
+// Supabase HTTP POST Function
+bool send_to_supabase(const char* json_data) {
+    esp_http_client_config_t config = {
+        .url = SUPABASE_URL,
+        .method = HTTP_METHOD_POST,
+        .cert_pem = supabase_cert_chain,
+        .cert_len = strlen(supabase_cert_chain) + 1,
+        .timeout_ms = 10000,
+        .keep_alive_enable = true,
+    };
+    
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize HTTP client");
+        return false;
+    }
+    
+    // Set headers
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "apikey", SUPABASE_KEY);
+    esp_http_client_set_header(client, "Authorization", "Bearer " SUPABASE_KEY);
+    
+    // Set POST data
+    esp_http_client_set_post_field(client, json_data, strlen(json_data));
+    
+    // Perform request with retry logic
+    esp_err_t err = ESP_FAIL;
+    for (int retry = 0; retry < 3; retry++) {
+        err = esp_http_client_perform(client);
+        if (err == ESP_OK) {
+            int status_code = esp_http_client_get_status_code(client);
+            if (status_code == 201) {
+                ESP_LOGI(TAG, "✅ Data sent successfully to Supabase");
+                esp_http_client_cleanup(client);
+                return true;
+            } else {
+                ESP_LOGW(TAG, "HTTP Status: %d", status_code);
+            }
+        } else {
+            ESP_LOGW(TAG, "HTTP request failed (attempt %d/3): %s", 
+                     retry + 1, esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000 * (retry + 1))); // Exponential backoff
+    }
+    
+    esp_http_client_cleanup(client);
+    return false;
+}
+```
+
 ## 🔧 Troubleshooting
 
 ### Common Issues and Solutions
@@ -482,6 +720,26 @@ E (6789) AQUA: ❌ HTTP POST failed: 400 Bad Request
 - Ensure database table schema matches
 - Verify network connectivity
 
+### Critical Error Recovery
+
+**System Crashes (Guru Meditation):**
+```c
+// Fixed null pointer handling
+if (client != NULL) {
+    esp_err_t err = esp_http_client_perform(client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    }
+}
+```
+
+**Memory Issues:**
+```c
+// Enable heap monitoring
+size_t free_heap = esp_get_free_heap_size();
+ESP_LOGI(TAG, "Free heap: %d bytes", free_heap);
+```
+
 ### Debug Commands
 
 ```bash
@@ -508,9 +766,96 @@ If the system becomes unresponsive:
 3. **Complete Reflash**: Erase flash and reflash firmware
 4. **Serial Recovery**: Use esptool.py for low-level recovery
 
+## 🔗 API Documentation
+
+### Supabase REST API
+
+#### Endpoint
+```
+POST https://konuwipzeywfgroqszzz.supabase.co/rest/v1/sensor_data
+```
+
+#### Headers
+```http
+Content-Type: application/json
+apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+#### Request Body
+```json
+{
+  "air_temperature": 25.6,
+  "humidity": 65.2,
+  "water_temperature": 24.8,
+  "ph": 7.2,
+  "turbidity": 15.3,
+  "dissolved_oxygen": 8.5,
+  "ammonia": 0.2,
+  "ph_relay": false,
+  "aerator": true,
+  "filter": true,
+  "pump": false
+}
+```
+
+#### Response
+```json
+{
+  "id": 12345,
+  "created_at": "2024-11-12T08:30:00.000Z",
+  "air_temperature": 25.6,
+  "humidity": 65.2,
+  "water_temperature": 24.8,
+  "ph": 7.2,
+  "turbidity": 15.3,
+  "dissolved_oxygen": 8.5,
+  "ammonia": 0.2,
+  "ph_relay": false,
+  "aerator": true,
+  "filter": true,
+  "pump": false,
+  "user_id": null
+}
+```
+
+### Query Examples
+
+#### Get Latest Readings
+```sql
+SELECT * FROM sensor_data 
+ORDER BY created_at DESC 
+LIMIT 10;
+```
+
+#### Get Average Values (Last Hour)
+```sql
+SELECT 
+  AVG(water_temperature) as avg_water_temp,
+  AVG(ph) as avg_ph,
+  AVG(turbidity) as avg_turbidity
+FROM sensor_data 
+WHERE created_at > NOW() - INTERVAL '1 hour';
+```
+
+#### Get Sensor Trends (Last 24 Hours)
+```sql
+SELECT 
+  DATE_TRUNC('hour', created_at) as hour,
+  AVG(water_temperature) as water_temp,
+  AVG(ph) as ph_level,
+  COUNT(*) as readings_count
+FROM sensor_data 
+WHERE created_at > NOW() - INTERVAL '24 hours'
+GROUP BY DATE_TRUNC('hour', created_at)
+ORDER BY hour;
+```
+
 ## 📊 Performance Metrics
 
 ### System Performance
+
+![System Performance](docs/images/system_performance.png)
 
 | Metric | Value | Notes |
 |--------|-------|-------|
@@ -523,12 +868,22 @@ If the system becomes unresponsive:
 
 ### Network Statistics
 
+![Network Reliability](docs/images/network_reliability.png)
+
 ```
 Successful Transmissions: 98.7%
 Average Response Time: 3.2 seconds
 SSL Handshake Success: 99.1%
 WiFi Reconnections: <0.5% per day
 ```
+
+### Memory Usage Analysis
+
+![Memory Usage](docs/images/memory_usage.png)
+
+### Sensor Data Trends
+
+![Sensor Data Simulation](docs/images/sensor_data_simulation.png)
 
 ### Sensor Accuracy
 
