@@ -11,6 +11,7 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "esp_http_client.h"
+#include "cJSON.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
@@ -936,6 +937,97 @@ static void cleanup_supabase_client(void) {
     }
 }
 
+// ========== RELAY CONTROL POLLING FROM SUPABASE ==========
+static bool poll_relay_commands(void) {
+    const int MAX_RETRIES = 2;
+    int retry_count = 0;
+    int delay_ms = 500;
+
+    ESP_LOGI(TAG, "[RELAY] Polling for relay control commands...");
+
+    while (retry_count < MAX_RETRIES) {
+        cleanup_supabase_client();
+        init_supabase_client();
+
+        if (!supabase_client) {
+            ESP_LOGE(TAG, "[RELAY] Failed to initialize client");
+            return false;
+        }
+
+        // Set headers for GET request to poll relay commands
+        esp_http_client_set_header(supabase_client, "Content-Type", "application/json");
+        esp_http_client_set_header(supabase_client, "apikey", SUPABASE_KEY);
+        esp_http_client_set_header(supabase_client, "Authorization", "Bearer " SUPABASE_KEY);
+        esp_http_client_set_header(supabase_client, "Prefer", "return=representation");
+
+        // Change method to GET and set URL for relay commands
+        esp_http_client_set_method(supabase_client, HTTP_METHOD_GET);
+        esp_http_client_set_url(supabase_client, SUPABASE_URL "/relay_commands?order=timestamp.desc&limit=10");
+
+        esp_err_t err = esp_http_client_perform(supabase_client);
+        int status_code = esp_http_client_get_status_code(supabase_client);
+
+        if (err == ESP_OK && status_code == 200) {
+            int content_length = esp_http_client_get_content_length(supabase_client);
+            if (content_length > 0 && content_length < 2048) {
+                char response_buffer[2048];
+                int data_read = esp_http_client_read_response(supabase_client, response_buffer, sizeof(response_buffer) - 1);
+                if (data_read > 0) {
+                    response_buffer[data_read] = '\0';
+                    ESP_LOGI(TAG, "[RELAY] Received commands: %s", response_buffer);
+
+                    // Parse JSON response and execute commands
+                    cJSON *json = cJSON_Parse(response_buffer);
+                    if (json && cJSON_IsArray(json)) {
+                        cJSON *command = NULL;
+                        cJSON_ArrayForEach(command, json) {
+                            cJSON *relay_type = cJSON_GetObjectItem(command, "relay_type");
+                            cJSON *state = cJSON_GetObjectItem(command, "state");
+
+                            if (cJSON_IsString(relay_type) && cJSON_IsBool(state)) {
+                                bool state_bool = cJSON_IsTrue(state);
+                                const char *type = relay_type->valuestring;
+
+                                if (strcmp(type, "ph") == 0) {
+                                    gpio_set_level(RELAY_PIN, state_bool ? 1 : 0);
+                                    ESP_LOGI(TAG, "[RELAY] pH relay set to %s", state_bool ? "ON" : "OFF");
+                                } else if (strcmp(type, "aerator") == 0) {
+                                    gpio_set_level(AERATOR_PIN, state_bool ? 1 : 0);
+                                    ESP_LOGI(TAG, "[RELAY] Aerator set to %s", state_bool ? "ON" : "OFF");
+                                } else if (strcmp(type, "filter") == 0) {
+                                    gpio_set_level(FILTER_PIN, state_bool ? 1 : 0);
+                                    ESP_LOGI(TAG, "[RELAY] Filter set to %s", state_bool ? "ON" : "OFF");
+                                } else if (strcmp(type, "pump") == 0) {
+                                    gpio_set_level(PUMP_RELAY_PIN, state_bool ? 1 : 0);
+                                    ESP_LOGI(TAG, "[RELAY] Pump relay set to %s", state_bool ? "ON" : "OFF");
+                                }
+                            }
+                        }
+                        cJSON_Delete(json);
+                    }
+                }
+            }
+            cleanup_supabase_client();
+            return true;
+        }
+
+        ESP_LOGW(TAG, "[RELAY] Poll attempt %d failed. Status: %d, Error: %s",
+                 retry_count + 1, status_code, esp_err_to_name(err));
+
+        cleanup_supabase_client();
+
+        if (retry_count < MAX_RETRIES - 1) {
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            delay_ms *= 2;
+        }
+
+        retry_count++;
+    }
+
+    ESP_LOGE(TAG, "[RELAY] All polling attempts failed");
+    return false;
+}
+
 // ========== IMPROVED HTTP UPLOAD ==========
 static bool send_to_supabase(float air_temp, float water_temp, float hum, float ph,
                         float do_level, float turbidity, float ammonia,
@@ -1543,6 +1635,10 @@ void app_main(void) {
         // Log final readings
         ESP_LOGI(TAG, "FINAL READINGS: Temperature=%.1f°C, Humidity=%.1f%%, pH=%.2f, Relay=%s",
                  air_temp, hum, ph, ph_relay_on ? "ON" : "OFF");
+
+        // Poll for relay control commands from Supabase
+        ESP_LOGI(TAG, "Polling for relay control commands...");
+        poll_relay_commands();
 
         // Send data to Supabase
         ESP_LOGI(TAG, "Sending data to Supabase...");
